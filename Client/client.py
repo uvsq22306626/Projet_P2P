@@ -1,118 +1,111 @@
 import socket
-import getpass  
-import threading
-import time
-import bcrypt
+from ftplib import FTP
+import os
+import getpass
 
-current_user = None  
+
+# 📌 Configuration du serveur central
+SERVER_IP = "10.188.142.246"  # Remplace par l'IP du serveur central
+SERVER_PORT = 5000
+
+# 📂 Dossier où seront stockés les fichiers téléchargés
+DOWNLOAD_FOLDER = "downloads"
+os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)  # Crée le dossier s'il n'existe pas
+
+# 📂 Port FTP utilisé pour partager les fichiers
+FTP_PORT = 21
+current_user = None
 
 def send_request(request):
-    """Envoie une requête au serveur et reçoit la réponse"""
+    """Envoie une requête au serveur P2P"""
     try:
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client.connect(("127.0.0.1", 5000))  
+        client.connect((SERVER_IP, SERVER_PORT))
         client.send(request.encode())
         response = client.recv(4096).decode()
-        print(response)
         client.close()
         return response
-    except ConnectionResetError:
-        print("❌ Erreur : Connexion au serveur perdue.")
     except Exception as e:
-        print(f"❌ Erreur inattendue : {e}")
+        print(f"❌ Erreur de connexion au serveur : {e}")
+        return None
 
-def get_local_ip():
-    """Retourne l'adresse IP locale de la machine"""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(("8.8.8.8", 80))
-    ip = s.getsockname()[0]
-    s.close()
-    return ip
+def download_file_via_ftp(server_ip, server_port, filename):
+    """Télécharge un fichier depuis un serveur FTP distant"""
+    try:
+        ftp = FTP()
+        ftp.connect(server_ip, int(server_port))
+        ftp.login("user", "password")  # Identifiants définis dans `ftp_server.py`
 
-def send_ping():
-    """Envoie un PING toutes les 30 secondes pour indiquer que l'utilisateur est actif"""
-    while current_user:
-        send_request(f"PING {current_user}")
-        time.sleep(30)  
+        with open(f"{DOWNLOAD_FOLDER}/{filename}", "wb") as file:
+            ftp.retrbinary(f"RETR {filename}", file.write)
 
-# === Menu du client ===
+        ftp.quit()
+        print(f"✅ Fichier '{filename}' téléchargé avec succès dans '{DOWNLOAD_FOLDER}/'.")
+    except Exception as e:
+        print(f"❌ Erreur de téléchargement via FTP : {e}")
+
+# 📌 Interface utilisateur
 while True:
     print("\n1. S'inscrire")
     print("2. Se connecter")
     print("3. Partager un fichier")
     print("4. Rechercher un fichier")
     print("5. Télécharger un fichier")
-    print("6. Se déconnecter")
-    print("7. Quitter")
+    print("6. Quitter")
 
     choix = input("Choisissez une option : ")
 
-    if choix == "1":  # S'inscrire
-        username = input("Nom d'utilisateur : ")
-        password = getpass.getpass("Mot de passe (caché) : ")  
-        
-        # 🔒 Hachage du mot de passe avant de l'envoyer
-        hashed_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        
-        send_request(f"REGISTER {username} {hashed_password}")  
-
-    elif choix == "2":  # Se connecter
+    if choix == "1":  # Inscription
         username = input("Nom d'utilisateur : ")
         password = getpass.getpass("Mot de passe (caché) : ")
-        ip = get_local_ip()  
-        response = send_request(f"LOGIN {username} {password} {ip}")  
-        
+        response = send_request(f"REGISTER {username} {password}")
+        print(response if response else "❌ Erreur lors de l'inscription.")
+
+    elif choix == "2":  # Connexion
+        username = input("Nom d'utilisateur : ")
+        password = getpass.getpass("Mot de passe (caché) : ")
+        ftp_ip = socket.gethostbyname(socket.gethostname())  # Récupère l'IP locale
+        response = send_request(f"LOGIN {username} {password} {ftp_ip} {FTP_PORT}")
+
         if response == "LOGIN_SUCCESS":
-            current_user = username  
-            threading.Thread(target=send_ping, daemon=True).start()  # 🔄 Lancer le PING automatique
+            current_user = username
+            print("✅ Connexion réussie.")
         else:
             print("❌ Échec de connexion.")
 
     elif choix == "3" and current_user:  # Partager un fichier
         filename = input("Nom du fichier à partager : ")
         description = input("Description du fichier : ")
-        send_request(f"UPLOAD {current_user} {filename} {description}")
+        response = send_request(f"UPLOAD {current_user} {filename} {description}")
+        print(response if response else "❌ Erreur lors du partage.")
 
     elif choix == "4" and current_user:  # Rechercher un fichier
         keyword = input("Mot-clé de recherche : ")
-        sort_by = input("Trier par (nom/date/propriétaire) : ").lower()
-
-        # Vérifier si l'utilisateur entre un bon type de tri
-        if sort_by not in ["nom", "date", "propriétaire"]:
-            print("❌ Option invalide pour le tri. Utilisation par défaut : nom.")
-            sort_by = "nom"
-
-        request = f"SEARCH {current_user} {keyword} {sort_by}"
-        print(f"🟢 Envoi de la requête au serveur : {request}")  # DEBUG
-        
-        response = send_request(request)
-        print(f"🔵 Réponse reçue : {response}")  # DEBUG
+        sort_by = input("Trier par (nom/date/propriétaire) : ")
+        response = send_request(f"SEARCH {current_user} {keyword} {sort_by}")
+        print(response if response else "❌ Aucun fichier trouvé.")
 
     elif choix == "5" and current_user:  # Télécharger un fichier
         filename = input("Entrez le nom du fichier à télécharger : ")
-        response = send_request(f"DOWNLOAD {current_user} {filename}")  
+        response = send_request(f"DOWNLOAD {current_user} {filename}")
 
         if "Disponible chez" in response:
-            owner_ip = response.split("(")[-1].strip(")")
-            print(f"📥 Téléchargement depuis {owner_ip}...")
+            owner_info = response.split("(")[-1].strip(")")
+            owner_ip, owner_port = owner_info.split(":")
+            print(f"📥 Téléchargement depuis FTP {owner_ip}:{owner_port}...")
 
             try:
-                from file_client import download_file
-                download_file(owner_ip, filename)
+                download_file_via_ftp(owner_ip, owner_port, filename)
             except Exception as e:
                 print(f"❌ Erreur de téléchargement : {e}")
         else:
-           print("❌ Fichier introuvable.")
+            print("❌ Fichier introuvable.")
 
-
-    elif choix == "6":  # Se déconnecter
-        send_request(f"LOGOUT {current_user}")
-        current_user = None
-        print("✅ Déconnexion réussie.")
-
-    elif choix == "7":  # Quitter
-        print("🔴 Fermeture du client...")
+    elif choix == "6":  # Quitter
+        if current_user:
+            send_request(f"LOGOUT {current_user}")
+        print("👋 Déconnexion... Au revoir !")
         break
 
     else:
-        print("❌ Option invalide, réessayez.")
+        print("❌ Option invalide ou vous devez d'abord vous connecter.")
